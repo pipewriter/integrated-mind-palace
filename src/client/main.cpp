@@ -105,30 +105,33 @@ int main(int argc, char** argv) {
 
     // Parse flags
     const char* server_host = "127.0.0.1";
+    uint16_t server_port = NET_PORT;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--host") == 0 && i + 1 < argc) server_host = argv[++i];
+        else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) server_port = (uint16_t)atoi(argv[++i]);
     }
 
     // Create runtime directories
     mkdir("image_cache", 0755);
 
-    // ---- Load world seed ----
+    // ---- Fetch seed from server (quick probe connection) ----
     {
-        FILE* sf = fopen("seed.txt", "r");
-        if (sf) {
-            uint32_t s = 0;
-            if (fscanf(sf, "%u", &s) == 1 && s != 0) {
-                g_world_seed = s;
-                printf("Loaded seed: %u\n", g_world_seed);
+        int probe_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (probe_fd >= 0) {
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(server_port);
+            inet_pton(AF_INET, server_host, &addr.sin_addr);
+            if (connect(probe_fd, (sockaddr*)&addr, sizeof(addr)) == 0) {
+                uint8_t buf[32];
+                ssize_t n = recv(probe_fd, buf, sizeof(buf), 0);
+                // WELCOME: [4 len][1 type=10][4 player_id][4 seed]
+                if (n >= 13 && buf[4] == S2C_WELCOME) {
+                    memcpy(&g_world_seed, buf + 9, 4);
+                    printf("Got server seed: %u\n", g_world_seed);
+                }
             }
-            fclose(sf);
-        } else {
-            // Generate and save a random seed
-            g_world_seed = (uint32_t)std::random_device{}();
-            if (g_world_seed == 0) g_world_seed = 1;
-            FILE* wf = fopen("seed.txt", "w");
-            if (wf) { fprintf(wf, "%u\n", g_world_seed); fclose(wf); }
-            printf("Generated new seed: %u\n", g_world_seed);
+            close(probe_fd);
         }
         g_variance = make_default_sampler(g_world_seed);
     }
@@ -291,8 +294,8 @@ int main(int argc, char** argv) {
     printf("Skybox initialized with random preset\n");
 
     // ---- Connect to server ----
-    printf("Connecting to %s:%d...\n", server_host, NET_PORT);
-    if (!net_connect(server_host)) {
+    printf("Connecting to %s:%d...\n", server_host, server_port);
+    if (!net_connect(server_host, server_port)) {
         fprintf(stderr, "Failed to connect to server!\n");
         cleanup();
         return 1;

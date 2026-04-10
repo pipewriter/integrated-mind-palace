@@ -1,0 +1,20 @@
+[Unit]
+Description=Exodia World - %i
+After=network.target
+
+[Service]
+Type=simple
+User=exodia
+Group=exodia
+EnvironmentFile=/opt/exodia/worlds/%i/env
+ExecStart=/opt/exodia/bin/server --port ${PORT} --datadir /opt/exodia/worlds/%i --cache-mb ${CACHE_MB} --seed ${SEED}
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=exodia-%i
+
+[Install]
+WantedBy=multi-user.target

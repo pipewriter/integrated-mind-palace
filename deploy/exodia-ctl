@@ -1,0 +1,181 @@
+#!/bin/bash
+# exodia-ctl — Manage Exodia MP world servers
+set -euo pipefail
+
+EXODIA_DIR="/opt/exodia"
+WORLDS_DIR="$EXODIA_DIR/worlds"
+LOBBY_JSON="$EXODIA_DIR/lobby.json"
+SERVER_BIN="$EXODIA_DIR/bin/server"
+PORT_START=10000
+
+usage() {
+    echo "Usage: exodia-ctl <command> [args]"
+    echo ""
+    echo "Commands:"
+    echo "  create <name> [--desc \"...\"]   Create a new world"
+    echo "  start <name>                    Start a world"
+    echo "  stop <name>                     Stop a world"
+    echo "  list                            List all worlds"
+    echo "  destroy <name>                  Stop and remove a world"
+    echo "  regen-lobby                     Regenerate lobby.json"
+    exit 1
+}
+
+next_port() {
+    local max_port=$PORT_START
+    local env_files
+    env_files=$(find "$WORLDS_DIR" -maxdepth 2 -name env 2>/dev/null)
+    for env_file in $env_files; do
+        [ -f "$env_file" ] || continue
+        local p
+        p=$(grep '^PORT=' "$env_file" | cut -d= -f2)
+        if [ "$p" -ge "$max_port" ] 2>/dev/null; then
+            max_port=$((p + 1))
+        fi
+    done
+    echo "$max_port"
+}
+
+regen_lobby() {
+    local host
+    # Try IMDSv2 for public IP, fall back to hostname
+    local token
+    token=$(curl -s --max-time 2 -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null)
+    host=$(curl -s --max-time 2 -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null)
+    [ -z "$host" ] && host=$(hostname -I | awk '{print $1}')
+
+    local worlds_json="["
+    local first=true
+    for world_dir in "$WORLDS_DIR"/*/; do
+        [ -d "$world_dir" ] || continue
+        local name
+        name=$(basename "$world_dir")
+        local env_file="$world_dir/env"
+        [ -f "$env_file" ] || continue
+
+        local port desc status
+        port=$(grep '^PORT=' "$env_file" | cut -d= -f2)
+        desc=$(grep '^DESC=' "$env_file" | cut -d= -f2- | tr -d '"')
+
+        if systemctl is-active --quiet "exodia-world@$name" 2>/dev/null; then
+            status="online"
+        else
+            status="offline"
+        fi
+
+        $first || worlds_json+=","
+        first=false
+        worlds_json+=$(printf '\n    {"name":"%s","port":%s,"status":"%s","description":"%s"}' \
+            "$name" "$port" "$status" "$desc")
+    done
+    worlds_json+="\n  ]"
+
+    printf '{\n  "host": "%s",\n  "worlds": %b\n}\n' "$host" "$worlds_json" > "$LOBBY_JSON"
+    echo "Lobby updated: $LOBBY_JSON"
+}
+
+cmd_create() {
+    local name="$1"; shift
+    local desc=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --desc) desc="$2"; shift 2 ;;
+            *) echo "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    local world_dir="$WORLDS_DIR/$name"
+    if [ -d "$world_dir" ]; then
+        echo "World '$name' already exists"
+        exit 1
+    fi
+
+    local port
+    port=$(next_port)
+
+    local seed
+    seed=$((RANDOM * RANDOM + RANDOM))
+
+    mkdir -p "$world_dir/media"
+    cat > "$world_dir/env" <<EOF
+PORT=$port
+CACHE_MB=32
+SEED=$seed
+DESC="${desc:-$name}"
+EOF
+
+    chown -R exodia:exodia "$world_dir"
+    echo "Created world '$name' on port $port"
+    regen_lobby
+}
+
+cmd_start() {
+    local name="$1"
+    if [ ! -d "$WORLDS_DIR/$name" ]; then
+        echo "World '$name' not found"
+        exit 1
+    fi
+    systemctl start "exodia-world@$name"
+    echo "Started world '$name'"
+    regen_lobby
+}
+
+cmd_stop() {
+    local name="$1"
+    systemctl stop "exodia-world@$name"
+    echo "Stopped world '$name'"
+    regen_lobby
+}
+
+cmd_list() {
+    printf "%-20s %-8s %-10s %s\n" "NAME" "PORT" "STATUS" "DESCRIPTION"
+    printf "%-20s %-8s %-10s %s\n" "----" "----" "------" "-----------"
+    for world_dir in "$WORLDS_DIR"/*/; do
+        [ -d "$world_dir" ] || continue
+        local name
+        name=$(basename "$world_dir")
+        local env_file="$world_dir/env"
+        [ -f "$env_file" ] || continue
+
+        local port desc status
+        port=$(grep '^PORT=' "$env_file" | cut -d= -f2)
+        desc=$(grep '^DESC=' "$env_file" | cut -d= -f2- | tr -d '"')
+
+        if systemctl is-active --quiet "exodia-world@$name" 2>/dev/null; then
+            status="online"
+        else
+            status="offline"
+        fi
+
+        printf "%-20s %-8s %-10s %s\n" "$name" "$port" "$status" "$desc"
+    done
+}
+
+cmd_destroy() {
+    local name="$1"
+    local world_dir="$WORLDS_DIR/$name"
+    if [ ! -d "$world_dir" ]; then
+        echo "World '$name' not found"
+        exit 1
+    fi
+
+    read -rp "Destroy world '$name' and all its data? [y/N] " confirm
+    [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || exit 0
+
+    systemctl stop "exodia-world@$name" 2>/dev/null || true
+    rm -rf "$world_dir"
+    echo "Destroyed world '$name'"
+    regen_lobby
+}
+
+[ $# -ge 1 ] || usage
+
+case "$1" in
+    create)   [ $# -ge 2 ] || usage; shift; cmd_create "$@" ;;
+    start)    [ $# -eq 2 ] || usage; cmd_start "$2" ;;
+    stop)     [ $# -eq 2 ] || usage; cmd_stop "$2" ;;
+    list)     cmd_list ;;
+    destroy)  [ $# -eq 2 ] || usage; cmd_destroy "$2" ;;
+    regen-lobby) regen_lobby ;;
+    *)        usage ;;
+esac

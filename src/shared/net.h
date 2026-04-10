@@ -47,7 +47,7 @@ enum MsgType : uint8_t {
     C2S_MOVE_Y     = 23,  // float x,y,z (12 bytes) + float dy (4 bytes) — move nearest node vertically
 
     // Server -> Client
-    S2C_WELCOME    = 10,  // uint32 player_id
+    S2C_WELCOME    = 10,  // uint32 player_id + uint32 world_seed
     S2C_WORLD_META = 11,  // uint32 count + per-node metadata (45 bytes each)
     S2C_NODE_DATA  = 12,  // uint32 hash + uint8 node_type + uint32 data_size + data
     S2C_PLAYERS    = 13,  // uint32 count + per-player (id,x,y,z,yaw,pitch = 24 bytes)

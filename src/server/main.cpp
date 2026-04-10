@@ -918,9 +918,24 @@ int main(int argc, char** argv) {
     signal(SIGTERM, sighandler);
     signal(SIGPIPE, SIG_IGN);
 
+    uint16_t port = NET_PORT;
+    const char* datadir = nullptr;
+    size_t cache_mb = 128;
+    uint32_t world_seed = 42;
     bool test_mode = false;
-    for (int i = 1; i < argc; i++)
+    for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--test") == 0) test_mode = true;
+        else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) port = (uint16_t)atoi(argv[++i]);
+        else if (strcmp(argv[i], "--datadir") == 0 && i + 1 < argc) datadir = argv[++i];
+        else if (strcmp(argv[i], "--cache-mb") == 0 && i + 1 < argc) cache_mb = (size_t)atoi(argv[++i]);
+        else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) world_seed = (uint32_t)atol(argv[++i]);
+    }
+
+    if (datadir) {
+        if (chdir(datadir) != 0) { perror("chdir"); return 1; }
+        printf("Data directory: %s\n", datadir);
+    }
+    g_media_cache.max_bytes = cache_mb * 1024 * 1024;
 
     // Ensure media directory exists
     mkdir(MEDIA_DIR, 0755);
@@ -966,7 +981,7 @@ int main(int argc, char** argv) {
 
     printf("Server starting with %d nodes, trail %dx%d\n",
            (int)g_world.size(), TRAIL_TEX_SIZE, TRAIL_TEX_SIZE);
-    printf("LRU media cache: %zu MB max\n", LRU_CACHE_MAX_BYTES / (1024 * 1024));
+    printf("LRU media cache: %zu MB max\n", g_media_cache.max_bytes / (1024 * 1024));
     print_ram_usage();
 
     // ---- Set up listening socket ----
@@ -978,12 +993,12 @@ int main(int argc, char** argv) {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(NET_PORT);
+    addr.sin_port = htons(port);
     if (bind(listen_fd, (sockaddr*)&addr, sizeof(addr)) < 0) { perror("bind"); return 1; }
     if (listen(listen_fd, 4) < 0) { perror("listen"); return 1; }
     net_set_nonblock(listen_fd);
 
-    printf("Listening on port %d (poll-based selector)\n", NET_PORT);
+    printf("Listening on port %d (poll-based selector)\n", port);
 
     auto now_ms = []() -> uint64_t {
         struct timespec ts;
@@ -1022,7 +1037,10 @@ int main(int argc, char** argv) {
                 uint32_t id = g_next_id++;
                 Client& c = g_clients[cfd];
                 c.fd = cfd; c.id = id;
-                send_to(c, S2C_WELCOME, &id, 4);
+                uint8_t welcome[8];
+                memcpy(welcome, &id, 4);
+                memcpy(welcome + 4, &world_seed, 4);
+                send_to(c, S2C_WELCOME, welcome, 8);
                 send_world_meta(c);
                 printf("Player %u connected (fd=%d)\n", id, cfd);
             }
@@ -1112,7 +1130,7 @@ int main(int argc, char** argv) {
             last_ram_print = now;
             printf("[RAM] LRU cache: %.1f MB / %zu MB (%zu entries)\n",
                    g_media_cache.current_bytes / (1024.0 * 1024.0),
-                   LRU_CACHE_MAX_BYTES / (1024 * 1024),
+                   g_media_cache.max_bytes / (1024 * 1024),
                    g_media_cache.lookup.size());
             print_ram_usage();
         }

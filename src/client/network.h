@@ -3,7 +3,7 @@
 #include <cstdint>
 
 // Connect to the multiplayer server
-bool net_connect(const char* host);
+bool net_connect(const char* host, uint16_t port);
 
 // Send a raw message to the server
 void net_send(uint8_t type, const void* payload, uint32_t plen);

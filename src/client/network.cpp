@@ -12,19 +12,19 @@
 #include <filesystem>
 #include <algorithm>
 
-bool net_connect(const char* host) {
+bool net_connect(const char* host, uint16_t port) {
     g_net_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (g_net_fd < 0) { perror("socket"); return false; }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(NET_PORT);
+    addr.sin_port = htons(port);
     inet_pton(AF_INET, host, &addr.sin_addr);
     if (connect(g_net_fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
         perror("connect"); close(g_net_fd); g_net_fd = -1; return false;
     }
     net_set_nonblock(g_net_fd);
     net_set_nodelay(g_net_fd);
-    printf("Connected to server %s:%d\n", host, NET_PORT);
+    printf("Connected to server %s:%d\n", host, port);
     return true;
 }
 
@@ -66,7 +66,12 @@ void handle_server_msg(uint8_t type, const uint8_t* pl, uint32_t plen) {
     case S2C_WELCOME: {
         if (plen < 4) break;
         memcpy(&g_player_id, pl, 4);
-        printf("Welcome! Player ID = %u\n", g_player_id);
+        if (plen >= 8) {
+            memcpy(&g_world_seed, pl + 4, 4);
+            printf("Welcome! Player ID = %u, world seed = %u\n", g_player_id, g_world_seed);
+        } else {
+            printf("Welcome! Player ID = %u\n", g_player_id);
+        }
         std::string title = "Exodia MP - Player " + std::to_string(g_player_id);
         glfwSetWindowTitle(app.window, title.c_str());
         break;
