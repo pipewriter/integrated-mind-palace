@@ -1,0 +1,16 @@
+# Build artifacts
+build/
+/client
+/server
+/objectcli
+
+# Runtime data
+image_cache/
+media/
+dump-folder/
+trails.sav
+world.sav
+
+# Large assets
+assets/
+videos/
