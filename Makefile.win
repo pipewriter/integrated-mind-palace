@@ -1,0 +1,67 @@
+# ================================================================
+# Exodia MP — Windows build (MSYS2 UCRT64 / MinGW)
+#
+# Usage: mingw32-make -f Makefile.win
+# ================================================================
+
+CXX       := g++
+CXXFLAGS  := -std=c++17 -Wall -Wextra -Wno-unused-parameter -O2 -DNDEBUG
+INCLUDES  := -Isrc -Ivendor
+
+# Windows needs ws2_32 for sockets, and dwmapi for window compositing
+CLIENT_LIBS := -lglfw3 -lvulkan-1 -lavformat -lavcodec -lavutil -lswscale -lswresample -lSDL2 -lz -lws2_32 -lgdi32 -ldwmapi
+SERVER_LIBS := -lws2_32
+
+CLIENT_SRCS := \
+	src/client/main.cpp \
+	src/client/app.cpp \
+	src/client/variance.cpp \
+	src/client/terrain.cpp \
+	src/client/structures.cpp \
+	src/client/collision.cpp \
+	src/client/trail.cpp \
+	src/client/sky.cpp \
+	src/client/vulkan_setup.cpp \
+	src/client/textures.cpp \
+	src/client/video.cpp \
+	src/client/text.cpp \
+	src/client/input.cpp \
+	src/client/network.cpp \
+	src/client/renderer.cpp
+
+SERVER_SRCS := src/server/main.cpp
+
+BUILD_DIR := build
+
+CLIENT_OBJS := $(CLIENT_SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
+SERVER_OBJS := $(SERVER_SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
+
+.PHONY: all client server clean
+
+all: client server
+
+client: $(BUILD_DIR)/exodia_client.exe
+	@cp $(BUILD_DIR)/exodia_client.exe ./client.exe
+
+server: $(BUILD_DIR)/exodia_server.exe
+	@cp $(BUILD_DIR)/exodia_server.exe ./server.exe
+
+$(BUILD_DIR)/exodia_client.exe: $(CLIENT_OBJS)
+	@echo "LINK $@"
+	@$(CXX) $(CXXFLAGS) $^ -o $@ $(CLIENT_LIBS)
+
+$(BUILD_DIR)/exodia_server.exe: $(SERVER_OBJS)
+	@echo "LINK $@"
+	@$(CXX) $(CXXFLAGS) $^ -o $@ $(SERVER_LIBS)
+
+$(BUILD_DIR)/%.o: src/%.cpp
+	@mkdir -p $(dir $@)
+	@echo "CXX  $<"
+	@$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+
+clean:
+	rm -rf $(BUILD_DIR)
+	rm -f client.exe server.exe
+
+-include $(CLIENT_OBJS:.o=.d)
+-include $(SERVER_OBJS:.o=.d)
