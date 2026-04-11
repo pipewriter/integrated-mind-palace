@@ -44,6 +44,21 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
 // ----------------------------------------------------------------
 
 std::vector<uint32_t> compile_glsl(const char* src, const char* stage, const char* label) {
+    // Try loading pre-compiled SPIR-V from shaders/ directory first
+    std::string spv_path = std::string("shaders/") + label + ".spv";
+    {
+        std::ifstream f(spv_path, std::ios::binary|std::ios::ate);
+        if (f.good()) {
+            size_t sz = f.tellg(); f.seekg(0);
+            if (sz >= 4) {
+                std::vector<uint32_t> code(sz / 4);
+                f.read(reinterpret_cast<char*>(code.data()), sz);
+                printf("Loaded pre-compiled shader: %s (%zu bytes)\n", spv_path.c_str(), sz);
+                return code;
+            }
+        }
+    }
+    // Fall back to runtime compilation via glslc
     std::string tmpdir = plat_tmpdir();
     std::string gp = tmpdir + "/_vk_" + label + ".glsl";
     std::string sp = tmpdir + "/_vk_" + label + ".spv";
