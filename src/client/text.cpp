@@ -145,6 +145,8 @@ void update_glyph_text(GlyphText& gt) {
 
 void destroy_glyph_text(GlyphText* gt) {
     if (!gt) return;
+    // Wait for GPU to finish using these buffers before destroying them
+    vkDeviceWaitIdle(app.device);
     if (gt->mapped_verts)   vkUnmapMemory(app.device, gt->vmem);
     if (gt->mapped_indices) vkUnmapMemory(app.device, gt->imem);
     if (gt->vbuf) vkDestroyBuffer(app.device, gt->vbuf, nullptr);

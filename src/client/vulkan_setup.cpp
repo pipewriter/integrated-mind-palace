@@ -44,10 +44,11 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
 // ----------------------------------------------------------------
 
 std::vector<uint32_t> compile_glsl(const char* src, const char* stage, const char* label) {
-    std::string gp = std::string("/tmp/_vk_") + label + ".glsl";
-    std::string sp = std::string("/tmp/_vk_") + label + ".spv";
+    std::string tmpdir = plat_tmpdir();
+    std::string gp = tmpdir + "/_vk_" + label + ".glsl";
+    std::string sp = tmpdir + "/_vk_" + label + ".spv";
     { std::ofstream f(gp); f << src; }
-    std::string cmd = std::string("glslc -fshader-stage=") + stage + " -O " + gp + " -o " + sp + " 2>&1";
+    std::string cmd = std::string("glslc -fshader-stage=") + stage + " -O \"" + gp + "\" -o \"" + sp + "\" 2>&1";
     FILE* p = popen(cmd.c_str(), "r");
     char buf[256]; std::string err;
     while (fgets(buf, sizeof(buf), p)) err += buf;

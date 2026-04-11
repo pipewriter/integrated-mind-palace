@@ -26,7 +26,7 @@
 
 #include "../shared/net.h"
 #include "../shared/constants.h"
-#include <signal.h>
+#include <csignal>
 #include <set>
 #include <map>
 #include <list>
@@ -35,32 +35,13 @@
 #include <string>
 #include <cstdlib>
 #include <cmath>
-#include <time.h>
-#include <sys/stat.h>
+#include <ctime>
 
 // ================================================================
-// RAM usage reporting (Linux /proc/self/status)
+// RAM usage reporting (cross-platform via platform.h)
 // ================================================================
 
-static void print_ram_usage() {
-    FILE* f = fopen("/proc/self/status", "r");
-    if (!f) {
-        printf("[RAM] Unable to read /proc/self/status\n");
-        return;
-    }
-    char line[256];
-    long vm_rss = -1, vm_size = -1;
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "VmRSS:", 6) == 0) {
-            sscanf(line + 6, " %ld", &vm_rss);
-        } else if (strncmp(line, "VmSize:", 7) == 0) {
-            sscanf(line + 7, " %ld", &vm_size);
-        }
-    }
-    fclose(f);
-    printf("[RAM] RSS: %ld kB (%.1f MB) | Virtual: %ld kB (%.1f MB)\n",
-           vm_rss, vm_rss / 1024.0, vm_size, vm_size / 1024.0);
-}
+static void print_ram_usage() { plat_print_ram(); }
 
 // ================================================================
 // Trail system — server-side footprint map
@@ -134,7 +115,7 @@ static bool save_trails() {
     fclose(f);
     if (rename(tmp.c_str(), TRAIL_SAVE_PATH) != 0) {
         fprintf(stderr, "Failed to rename trail save file\n");
-        unlink(tmp.c_str()); return false;
+        plat_unlink(tmp.c_str()); return false;
     }
     printf("Saved trail data (%u x %u) to %s\n", tex_size, tex_size, TRAIL_SAVE_PATH);
     g_trail_dirty = false;
@@ -303,7 +284,7 @@ static constexpr uint32_t SAVE_MAGIC_V4 = 0x45584F04; // disk-backed media
 // ================================================================
 
 struct Client {
-    int fd;
+    socket_t fd;
     uint32_t id;
     float x = 0, y = 60, z = 0, yaw = -90, pitch = 0;
     NetBuf recv_buf;
@@ -313,7 +294,7 @@ struct Client {
     bool synced = false;
 };
 
-static std::map<int, Client> g_clients;
+static std::map<socket_t, Client> g_clients;
 static uint32_t g_next_id = 1;
 static volatile bool g_running = true;
 static bool g_world_dirty = false;
@@ -356,7 +337,7 @@ static bool save_world() {
     fclose(f);
     if (rename(tmp.c_str(), SAVE_PATH) != 0) {
         fprintf(stderr, "Failed to rename save file\n");
-        unlink(tmp.c_str()); return false;
+        plat_unlink(tmp.c_str()); return false;
     }
     printf("Saved %u nodes to %s (v4 disk-backed format)\n", count, SAVE_PATH);
     return true;
@@ -454,7 +435,7 @@ static void send_to(Client& c, uint8_t type, const void* payload, uint32_t plen)
     c.send_q.push(type, payload, plen);
 }
 
-static void broadcast(uint8_t type, const void* payload, uint32_t plen, int exclude_fd = -1) {
+static void broadcast(uint8_t type, const void* payload, uint32_t plen, socket_t exclude_fd = INVALID_SOCK) {
     for (auto& [fd, c] : g_clients)
         if (fd != exclude_fd && c.synced)
             send_to(c, type, payload, plen);
@@ -914,9 +895,14 @@ static void sighandler(int) { g_running = false; }
 
 int main(int argc, char** argv) {
     setbuf(stdout, NULL);
+#ifdef _WIN32
+    WinsockInit _wsa;
+#endif
     signal(SIGINT, sighandler);
     signal(SIGTERM, sighandler);
+#ifndef _WIN32
     signal(SIGPIPE, SIG_IGN);
+#endif
 
     uint16_t port = NET_PORT;
     const char* datadir = nullptr;
@@ -932,13 +918,13 @@ int main(int argc, char** argv) {
     }
 
     if (datadir) {
-        if (chdir(datadir) != 0) { perror("chdir"); return 1; }
+        if (plat_chdir(datadir) != 0) { perror("chdir"); return 1; }
         printf("Data directory: %s\n", datadir);
     }
     g_media_cache.max_bytes = cache_mb * 1024 * 1024;
 
     // Ensure media directory exists
-    mkdir(MEDIA_DIR, 0755);
+    plat_mkdir(MEDIA_DIR);
 
     if (!load_world())
         printf("No world.sav found, starting with empty world\n");
@@ -985,10 +971,10 @@ int main(int argc, char** argv) {
     print_ram_usage();
 
     // ---- Set up listening socket ----
-    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd < 0) { perror("socket"); return 1; }
+    socket_t listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (!sock_valid(listen_fd)) { perror("socket"); return 1; }
     int opt = 1;
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    plat_setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -1000,38 +986,34 @@ int main(int argc, char** argv) {
 
     printf("Listening on port %d (poll-based selector)\n", port);
 
-    auto now_ms = []() -> uint64_t {
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        return ts.tv_sec * 1000ULL + ts.tv_nsec / 1000000ULL;
-    };
-
-    uint64_t last_broadcast = now_ms();
-    uint64_t last_trail_save = now_ms();
-    uint64_t last_world_save = now_ms();
-    uint64_t last_ram_print = now_ms();
+    uint64_t last_broadcast = plat_now_ms();
+    uint64_t last_trail_save = plat_now_ms();
+    uint64_t last_world_save = plat_now_ms();
+    uint64_t last_ram_print = plat_now_ms();
 
     // ---- Main event loop ----
     while (g_running) {
         // Build poll descriptor set
         std::vector<pollfd> fds;
-        fds.push_back({listen_fd, POLLIN, 0});
-        std::vector<int> client_fds;
+        { pollfd pf = {}; pf.fd = listen_fd; pf.events = POLLIN; fds.push_back(pf); }
+        std::vector<socket_t> client_fds;
         for (auto& [fd, c] : g_clients) {
-            short events = POLLIN;
-            if (c.send_q.pending()) events |= POLLOUT;
-            fds.push_back({fd, events, 0});
+            pollfd pf = {};
+            pf.fd = fd;
+            pf.events = POLLIN;
+            if (c.send_q.pending()) pf.events |= POLLOUT;
+            fds.push_back(pf);
             client_fds.push_back(fd);
         }
 
-        poll(fds.data(), fds.size(), 20);
+        poll(fds.data(), (unsigned long)fds.size(), 20);
 
         // Accept new connections
         if (fds[0].revents & POLLIN) {
             sockaddr_in ca;
             socklen_t cl = sizeof(ca);
-            int cfd = accept(listen_fd, (sockaddr*)&ca, &cl);
-            if (cfd >= 0) {
+            socket_t cfd = accept(listen_fd, (sockaddr*)&ca, &cl);
+            if (sock_valid(cfd)) {
                 net_set_nonblock(cfd);
                 net_set_nodelay(cfd);
                 uint32_t id = g_next_id++;
@@ -1042,12 +1024,12 @@ int main(int argc, char** argv) {
                 memcpy(welcome + 4, &world_seed, 4);
                 send_to(c, S2C_WELCOME, welcome, 8);
                 send_world_meta(c);
-                printf("Player %u connected (fd=%d)\n", id, cfd);
+                printf("Player %u connected (fd=%lld)\n", id, (long long)cfd);
             }
         }
 
         // Process client I/O
-        std::vector<int> to_remove;
+        std::vector<socket_t> to_remove;
         for (size_t i = 0; i < client_fds.size(); i++) {
             int fd = client_fds[i];
             auto it = g_clients.find(fd);
@@ -1081,7 +1063,7 @@ int main(int argc, char** argv) {
         }
 
         // Handle disconnections
-        for (int fd : to_remove) {
+        for (socket_t fd : to_remove) {
             auto it = g_clients.find(fd);
             if (it == g_clients.end()) continue;
             printf("Player %u disconnected\n", it->second.id);
@@ -1092,11 +1074,11 @@ int main(int argc, char** argv) {
             if (!it->second.inventory.empty())
                 g_world_dirty = true;
             g_clients.erase(it);
-            close(fd);
+            plat_close_socket(fd);
         }
 
         // Broadcast player positions every 50ms
-        uint64_t now = now_ms();
+        uint64_t now = plat_now_ms();
         if (now - last_broadcast >= 50 && !g_clients.empty()) {
             last_broadcast = now;
             uint32_t count = (uint32_t)g_clients.size();
@@ -1143,12 +1125,12 @@ int main(int argc, char** argv) {
             printf("  Returning inventory node hash=%08x to world\n", node.hash);
             g_world.push_back(std::move(node));
         }
-        close(fd);
+        plat_close_socket(fd);
     }
     g_clients.clear();
     save_world();
     if (g_trail_dirty) save_trails();
-    close(listen_fd);
+    plat_close_socket(listen_fd);
     print_ram_usage();
     printf("Server stopped. %d nodes saved. Trail %s.\n",
            (int)g_world.size(), g_trail_dirty ? "saved" : "unchanged");

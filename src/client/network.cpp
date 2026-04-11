@@ -14,13 +14,13 @@
 
 bool net_connect(const char* host, uint16_t port) {
     g_net_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (g_net_fd < 0) { perror("socket"); return false; }
+    if (!sock_valid(g_net_fd)) { perror("socket"); return false; }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     inet_pton(AF_INET, host, &addr.sin_addr);
     if (connect(g_net_fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("connect"); close(g_net_fd); g_net_fd = -1; return false;
+        perror("connect"); plat_close_socket(g_net_fd); g_net_fd = INVALID_SOCK; return false;
     }
     net_set_nonblock(g_net_fd);
     net_set_nodelay(g_net_fd);
@@ -29,7 +29,7 @@ bool net_connect(const char* host, uint16_t port) {
 }
 
 void net_send(uint8_t type, const void* payload, uint32_t plen) {
-    if (g_net_fd < 0) return;
+    if (!sock_valid(g_net_fd)) return;
     g_net_send.push(type, payload, plen);
 }
 
@@ -40,11 +40,11 @@ void net_send_pos() {
 }
 
 void net_poll() {
-    if (g_net_fd < 0) return;
+    if (!sock_valid(g_net_fd)) return;
     // Non-blocking recv
     if (net_recv(g_net_fd, g_net_recv) < 0) {
         printf("Disconnected from server\n");
-        close(g_net_fd); g_net_fd = -1; return;
+        plat_close_socket(g_net_fd); g_net_fd = INVALID_SOCK; return;
     }
     // Process complete messages
     uint8_t type; const uint8_t* payload; uint32_t msglen;
@@ -55,7 +55,7 @@ void net_poll() {
     if (g_net_send.pending()) {
         if (!g_net_send.flush(g_net_fd)) {
             printf("Send error, disconnected\n");
-            close(g_net_fd); g_net_fd = -1;
+            plat_close_socket(g_net_fd); g_net_fd = INVALID_SOCK;
         }
     }
 }

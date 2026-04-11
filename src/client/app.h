@@ -30,6 +30,7 @@ extern "C" {
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 }
+#define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
 
 // ----------------------------------------------------------------
@@ -293,7 +294,7 @@ extern VarianceSampler g_variance;
 extern std::vector<DataNode> g_world;
 
 // Multiplayer networking
-extern int g_net_fd;
+extern socket_t g_net_fd;
 extern uint32_t g_player_id;
 extern NetBuf g_net_recv;
 extern SendQ g_net_send;

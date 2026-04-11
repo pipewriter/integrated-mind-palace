@@ -33,7 +33,6 @@
 #include <cstring>
 #include <random>
 #include <algorithm>
-#include <sys/stat.h>
 
 // ----------------------------------------------------------------
 // Cone-based selection — find the best target in front of the camera
@@ -101,6 +100,9 @@ static void update_selection() {
 
 int main(int argc, char** argv) {
     setbuf(stdout, NULL);
+#ifdef _WIN32
+    WinsockInit _wsa;
+#endif
     using Clock = std::chrono::high_resolution_clock;
 
     // Parse flags
@@ -112,26 +114,26 @@ int main(int argc, char** argv) {
     }
 
     // Create runtime directories
-    mkdir("image_cache", 0755);
+    plat_mkdir("image_cache");
 
     // ---- Fetch seed from server (quick probe connection) ----
     {
-        int probe_fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (probe_fd >= 0) {
+        socket_t probe_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock_valid(probe_fd)) {
             sockaddr_in addr{};
             addr.sin_family = AF_INET;
             addr.sin_port = htons(server_port);
             inet_pton(AF_INET, server_host, &addr.sin_addr);
             if (connect(probe_fd, (sockaddr*)&addr, sizeof(addr)) == 0) {
-                uint8_t buf[32];
+                char buf[32];
                 ssize_t n = recv(probe_fd, buf, sizeof(buf), 0);
                 // WELCOME: [4 len][1 type=10][4 player_id][4 seed]
-                if (n >= 13 && buf[4] == S2C_WELCOME) {
+                if (n >= 13 && (uint8_t)buf[4] == S2C_WELCOME) {
                     memcpy(&g_world_seed, buf + 9, 4);
                     printf("Got server seed: %u\n", g_world_seed);
                 }
             }
-            close(probe_fd);
+            plat_close_socket(probe_fd);
         }
         g_variance = make_default_sampler(g_world_seed);
     }
@@ -303,19 +305,27 @@ int main(int argc, char** argv) {
 
     // Blocking initial sync (welcome + world_meta + data + trail)
     {
+        // Set socket to blocking for initial sync
+#ifdef _WIN32
+        u_long mode = 0;
+        ioctlsocket(g_net_fd, FIONBIO, &mode);
+#else
         int flags = fcntl(g_net_fd, F_GETFL, 0);
         fcntl(g_net_fd, F_SETFL, flags & ~O_NONBLOCK);
+#endif
 
         auto start = Clock::now();
         while (!g_synced) {
             glfwPollEvents();
             if (glfwWindowShouldClose(app.window)) break;
 
-            uint8_t tmp[65536];
+            char tmp[65536];
             ssize_t n = recv(g_net_fd, tmp, sizeof(tmp), 0);
             if (n <= 0) {
                 if (n == 0) { printf("Server closed connection during sync\n"); break; }
+#ifndef _WIN32
                 if (errno == EINTR) continue;
+#endif
                 break;
             }
             g_net_recv.append(tmp, n);
@@ -385,11 +395,7 @@ int main(int argc, char** argv) {
         // FPS + memory stats
         fps_c++;
         if (now - fps_t >= 1) {
-            long rss = 0;
-            if (FILE* f = fopen("/proc/self/statm", "r")) {
-                long dummy; fscanf(f, "%ld %ld", &dummy, &rss); fclose(f);
-                rss = rss * 4096L / (1024L * 1024L);
-            }
+            long rss = plat_rss_mb();
             printf("FPS: %d  RSS: %ld MB  World: %d  Inv: %d  Players: %d\n",
                    fps_c, rss, (int)g_world.size(), g_inv_count, (int)g_remote_players.size() + 1);
             fps_c = 0; fps_t = now;
@@ -516,7 +522,7 @@ int main(int argc, char** argv) {
     }
 
     // ---- Shutdown ----
-    if (g_net_fd >= 0) close(g_net_fd);
+    if (sock_valid(g_net_fd)) plat_close_socket(g_net_fd);
     cleanup();
     return 0;
 }

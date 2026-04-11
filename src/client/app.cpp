@@ -16,7 +16,7 @@ VarianceSampler g_variance = make_default_sampler(42);
 std::vector<DataNode> g_world;
 
 // Multiplayer networking
-int g_net_fd = -1;
+socket_t g_net_fd = INVALID_SOCK;
 uint32_t g_player_id = 0;
 NetBuf g_net_recv;
 SendQ g_net_send;

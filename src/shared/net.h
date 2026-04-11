@@ -8,17 +8,11 @@
 // ================================================================
 #pragma once
 
+#include "platform.h"
+
 #include <cstdint>
 #include <cstring>
 #include <vector>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <poll.h>
-#include <cerrno>
 #include <cstdio>
 
 static constexpr uint16_t NET_PORT = 9998;
@@ -101,11 +95,12 @@ struct SendQ {
         buf.insert(buf.end(), p, p + n);
     }
 
-    bool flush(int fd) {
+    bool flush(socket_t fd) {
         while (spos < buf.size()) {
-            ssize_t n = ::send(fd, buf.data() + spos, buf.size() - spos, MSG_NOSIGNAL);
+            ssize_t n = ::send(fd, (const char*)(buf.data() + spos),
+                               (int)(buf.size() - spos), MSG_NOSIGNAL);
             if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                if (plat_would_block()) break;
                 return false;
             }
             if (n == 0) return false;
@@ -134,20 +129,20 @@ inline bool net_try_read(NetBuf& buf, uint8_t& type, const uint8_t*& payload, ui
 }
 
 // Non-blocking recv into buffer. Returns: >0=bytes, 0=would-block, -1=closed/error
-inline int net_recv(int fd, NetBuf& buf) {
-    uint8_t tmp[65536];
+inline int net_recv(socket_t fd, NetBuf& buf) {
+    char tmp[65536];
     ssize_t n = ::recv(fd, tmp, sizeof(tmp), 0);
     if (n > 0) { buf.append(tmp, n); return (int)n; }
     if (n == 0) return -1;
-    if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+    if (plat_would_block()) return 0;
     return -1;
 }
 
-inline void net_set_nonblock(int fd) {
-    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+inline void net_set_nonblock(socket_t fd) {
+    plat_set_nonblock(fd);
 }
 
-inline void net_set_nodelay(int fd) {
+inline void net_set_nodelay(socket_t fd) {
     int one = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    plat_setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 }

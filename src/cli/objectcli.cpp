@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <chrono>
+#include <thread>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -28,17 +30,22 @@ extern "C" {
 #define STB_IMAGE_IMPLEMENTATION
 #include "../../vendor/stb_image.h"
 
+// Cross-platform sleep in milliseconds
+static void sleep_ms(int ms) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
 // Send a complete message (blocking)
-static bool send_msg(int fd, uint8_t type, const void* payload, uint32_t plen) {
+static bool send_msg(socket_t fd, uint8_t type, const void* payload, uint32_t plen) {
     uint32_t len = 1 + plen;
     uint8_t header[5];
     memcpy(header, &len, 4);
     header[4] = type;
 
     auto send_all = [&](const void* data, size_t n) -> bool {
-        const uint8_t* p = (const uint8_t*)data;
+        const char* p = (const char*)data;
         while (n > 0) {
-            ssize_t sent = ::send(fd, p, n, MSG_NOSIGNAL);
+            ssize_t sent = ::send(fd, p, (int)n, MSG_NOSIGNAL);
             if (sent <= 0) return false;
             p += sent; n -= sent;
         }
@@ -51,10 +58,10 @@ static bool send_msg(int fd, uint8_t type, const void* payload, uint32_t plen) {
 }
 
 // Read exactly n bytes (blocking)
-static bool recv_all(int fd, void* buf, size_t n) {
-    uint8_t* p = (uint8_t*)buf;
+static bool recv_all(socket_t fd, void* buf, size_t n) {
+    char* p = (char*)buf;
     while (n > 0) {
-        ssize_t got = ::recv(fd, p, n, 0);
+        ssize_t got = ::recv(fd, p, (int)n, 0);
         if (got <= 0) return false;
         p += got; n -= got;
     }
@@ -62,7 +69,7 @@ static bool recv_all(int fd, void* buf, size_t n) {
 }
 
 // Wait for welcome message, return player ID
-static bool wait_welcome(int fd, uint32_t& id) {
+static bool wait_welcome(socket_t fd, uint32_t& id) {
     uint8_t buf[9]; // 4 len + 1 type + 4 id
     if (!recv_all(fd, buf, 9)) return false;
     if (buf[4] != S2C_WELCOME) return false;
@@ -103,26 +110,36 @@ static bool probe_video(const char* path, uint32_t& w, uint32_t& h) {
 }
 
 // Drain any pending server messages (non-blocking) so connection doesn't stall
-static void drain_responses(int fd) {
-    uint8_t tmp[65536];
+static void drain_responses(socket_t fd) {
+    // Temporarily set non-blocking
+    plat_set_nonblock(fd);
+    char tmp[65536];
     while (true) {
-        ssize_t n = ::recv(fd, tmp, sizeof(tmp), MSG_DONTWAIT);
+        ssize_t n = ::recv(fd, tmp, sizeof(tmp), 0);
         if (n <= 0) break;
     }
+    // Set back to blocking
+#ifdef _WIN32
+    u_long mode = 0;
+    ioctlsocket(fd, FIONBIO, &mode);
+#else
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+#endif
 }
 
-// Connect to server and return fd, or -1 on failure
-static int connect_to_server(const char* host) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) { perror("socket"); return -1; }
+// Connect to server and return socket, or INVALID_SOCK on failure
+static socket_t connect_to_server(const char* host) {
+    socket_t fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (!sock_valid(fd)) { perror("socket"); return INVALID_SOCK; }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(NET_PORT);
     if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
-        fprintf(stderr, "Invalid host: %s\n", host); close(fd); return -1;
+        fprintf(stderr, "Invalid host: %s\n", host); plat_close_socket(fd); return INVALID_SOCK;
     }
     if (connect(fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("connect"); close(fd); return -1;
+        perror("connect"); plat_close_socket(fd); return INVALID_SOCK;
     }
     net_set_nodelay(fd);
     return fd;
@@ -133,16 +150,16 @@ static int do_delete_region(float x1, float z1, float x2, float z2, const char* 
     if (x1 > x2) std::swap(x1, x2);
     if (z1 > z2) std::swap(z1, z2);
 
-    int fd = connect_to_server(host);
-    if (fd < 0) return 1;
+    socket_t fd = connect_to_server(host);
+    if (!sock_valid(fd)) return 1;
 
     uint32_t player_id;
     if (!wait_welcome(fd, player_id)) {
-        fprintf(stderr, "Failed to receive welcome\n"); close(fd); return 1;
+        fprintf(stderr, "Failed to receive welcome\n"); plat_close_socket(fd); return 1;
     }
 
     // Drain world meta + trail data the server sends on connect
-    usleep(200000);
+    sleep_ms(200);
     drain_responses(fd);
 
     printf("Connected as player %u\n", player_id);
@@ -164,7 +181,7 @@ static int do_delete_region(float x1, float z1, float x2, float z2, const char* 
                 for (float z = z1; z <= z2; z += step) {
                     float data[3] = { x, y, z };
                     if (!send_msg(fd, C2S_DELETE, data, 12)) {
-                        fprintf(stderr, "Send failed\n"); close(fd); return 1;
+                        fprintf(stderr, "Send failed\n"); plat_close_socket(fd); return 1;
                     }
                     pass_count++;
                     deleted++;
@@ -172,7 +189,7 @@ static int do_delete_region(float x1, float z1, float x2, float z2, const char* 
             }
         }
         // Let server process
-        usleep(50000);
+        sleep_ms(50);
         drain_responses(fd);
 
         // After first pass we know the grid, if pass_count is small just do a few
@@ -184,8 +201,8 @@ static int do_delete_region(float x1, float z1, float x2, float z2, const char* 
     }
 
     printf("Done — sent %d total delete requests\n", deleted);
-    usleep(100000);
-    close(fd);
+    sleep_ms(100);
+    plat_close_socket(fd);
     return 0;
 }
 
@@ -201,6 +218,9 @@ static void usage() {
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    WinsockInit _wsa;
+#endif
     if (argc < 2) usage();
 
     // Check for --delete-region mode
@@ -289,13 +309,13 @@ int main(int argc, char** argv) {
     }
 
     // Connect to server
-    int fd = connect_to_server(host);
-    if (fd < 0) return 1;
+    socket_t fd = connect_to_server(host);
+    if (!sock_valid(fd)) return 1;
 
     // Wait for welcome
     uint32_t player_id;
     if (!wait_welcome(fd, player_id)) {
-        fprintf(stderr, "Failed to receive welcome\n"); close(fd); return 1;
+        fprintf(stderr, "Failed to receive welcome\n"); plat_close_socket(fd); return 1;
     }
     printf("Connected as player %u\n", player_id);
 
@@ -319,7 +339,7 @@ int main(int argc, char** argv) {
     if (dsz > 0) memcpy(msg.data()+45, data.data(), dsz);
 
     if (!send_msg(fd, C2S_ADD_NODE, msg.data(), (uint32_t)msg.size())) {
-        fprintf(stderr, "Failed to send node\n"); close(fd); return 1;
+        fprintf(stderr, "Failed to send node\n"); plat_close_socket(fd); return 1;
     }
 
     printf("Sent %s node at (%.1f, %.1f, %.1f) size %.1fx%.1f\n",
@@ -327,7 +347,7 @@ int main(int argc, char** argv) {
            px, py, pz, size_w, size_h);
 
     // Brief pause to let server process before we disconnect
-    usleep(100000);
-    close(fd);
+    sleep_ms(100);
+    plat_close_socket(fd);
     return 0;
 }

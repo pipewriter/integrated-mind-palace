@@ -8,9 +8,11 @@ CXX       := g++
 CXXFLAGS  := -std=c++17 -Wall -Wextra -Wno-unused-parameter -O2 -DNDEBUG
 INCLUDES  := -Isrc -Ivendor
 
-# Windows needs ws2_32 for sockets, and dwmapi for window compositing
-CLIENT_LIBS := -lglfw3 -lvulkan-1 -lavformat -lavcodec -lavutil -lswscale -lswresample -lSDL2 -lz -lws2_32 -lgdi32 -ldwmapi
-SERVER_LIBS := -lws2_32
+# Windows needs ws2_32 for sockets, psapi for memory reporting, and gdi32/dwmapi for window compositing
+# -mconsole forces console subsystem (main entry), -lglfw3 links GLFW dynamically (.dll.a)
+CLIENT_LIBS := -mconsole -lglfw3 -lvulkan-1 -lavformat -lavcodec -lavutil -lswscale -lswresample -lSDL2 -lz -lws2_32 -lpsapi -lgdi32 -ldwmapi
+SERVER_LIBS := -lws2_32 -lpsapi
+CLI_LIBS    := -lavformat -lavcodec -lavutil -lws2_32
 
 CLIENT_SRCS := \
 	src/client/main.cpp \
@@ -30,21 +32,26 @@ CLIENT_SRCS := \
 	src/client/renderer.cpp
 
 SERVER_SRCS := src/server/main.cpp
+CLI_SRCS    := src/cli/objectcli.cpp
 
 BUILD_DIR := build
 
 CLIENT_OBJS := $(CLIENT_SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
 SERVER_OBJS := $(SERVER_SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
+CLI_OBJS    := $(CLI_SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
 
-.PHONY: all client server clean
+.PHONY: all client server objectcli clean
 
-all: client server
+all: client server objectcli
 
 client: $(BUILD_DIR)/exodia_client.exe
 	@cp $(BUILD_DIR)/exodia_client.exe ./client.exe
 
 server: $(BUILD_DIR)/exodia_server.exe
 	@cp $(BUILD_DIR)/exodia_server.exe ./server.exe
+
+objectcli: $(BUILD_DIR)/exodia_objectcli.exe
+	@cp $(BUILD_DIR)/exodia_objectcli.exe ./objectcli.exe
 
 $(BUILD_DIR)/exodia_client.exe: $(CLIENT_OBJS)
 	@echo "LINK $@"
@@ -54,6 +61,10 @@ $(BUILD_DIR)/exodia_server.exe: $(SERVER_OBJS)
 	@echo "LINK $@"
 	@$(CXX) $(CXXFLAGS) $^ -o $@ $(SERVER_LIBS)
 
+$(BUILD_DIR)/exodia_objectcli.exe: $(CLI_OBJS)
+	@echo "LINK $@"
+	@$(CXX) $(CXXFLAGS) $^ -o $@ $(CLI_LIBS)
+
 $(BUILD_DIR)/%.o: src/%.cpp
 	@mkdir -p $(dir $@)
 	@echo "CXX  $<"
@@ -61,7 +72,8 @@ $(BUILD_DIR)/%.o: src/%.cpp
 
 clean:
 	rm -rf $(BUILD_DIR)
-	rm -f client.exe server.exe
+	rm -f client.exe server.exe objectcli.exe
 
 -include $(CLIENT_OBJS:.o=.d)
 -include $(SERVER_OBJS:.o=.d)
+-include $(CLI_OBJS:.o=.d)

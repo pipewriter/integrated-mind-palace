@@ -19,7 +19,6 @@
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
-#include <sys/stat.h>
 
 // ----------------------------------------------------------------
 // File-local helpers
@@ -245,7 +244,7 @@ int get_or_create_texture(uint32_t hash, uint32_t w, uint32_t h, const unsigned 
 // ----------------------------------------------------------------
 
 void save_terrain_cache(const Mesh& mesh) {
-    mkdir("cache", 0755);
+    plat_mkdir("cache");
     FILE* f = fopen("cache/terrain.mesh", "wb");
     if (!f) { fprintf(stderr, "Failed to write cache/terrain.mesh\n"); return; }
     uint32_t vc = (uint32_t)mesh.vertices.size();
@@ -495,7 +494,7 @@ struct TextureCacheEntry {
 };
 
 void save_texture_cache(const std::vector<std::string>& paths) {
-    mkdir("cache", 0755);
+    plat_mkdir("cache");
     FILE* f = fopen("cache/textures.pack", "wb");
     if (!f) { fprintf(stderr, "Failed to write cache/textures.pack\n"); return; }
 

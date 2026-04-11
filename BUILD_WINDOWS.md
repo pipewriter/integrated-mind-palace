@@ -42,7 +42,15 @@ Build with the Windows Makefile:
 mingw32-make -f Makefile.win
 ```
 
-This produces `client.exe` and `server.exe`.
+This produces `client.exe`, `server.exe`, and `objectcli.exe`.
+
+Build individual targets:
+
+```bash
+mingw32-make -f Makefile.win client    # Client only
+mingw32-make -f Makefile.win server    # Server only
+mingw32-make -f Makefile.win objectcli # CLI tool only
+```
 
 ## 5. Connect to a server
 
@@ -57,6 +65,8 @@ Or run a local server:
 ./client.exe --host 127.0.0.1 --port 9998
 ```
 
+The Windows client connects to Linux servers with the same binary TCP protocol — fully cross-platform.
+
 ## 6. GPU drivers
 
 Make sure you have up-to-date GPU drivers with Vulkan support:
@@ -70,3 +80,4 @@ Make sure you have up-to-date GPU drivers with Vulkan support:
 - **Black screen**: Update GPU drivers, ensure Vulkan is supported
 - **Link errors**: Make sure you're using the UCRT64 terminal, not MSYS2 MSYS
 - **Missing DLLs at runtime**: Run from the MSYS2 UCRT64 terminal, or copy the required DLLs next to client.exe
+- **Clipboard images**: Windows uses the native Win32 clipboard API instead of xclip

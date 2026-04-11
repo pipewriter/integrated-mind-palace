@@ -14,9 +14,11 @@
 #include <cstdlib>
 #include <algorithm>
 #include <filesystem>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <zlib.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "../../vendor/stb_image.h"
 
@@ -100,20 +102,58 @@ static void extract_to_clipboard(const DataNode& node) {
         std::vector<unsigned char> pixels;
         uint32_t w, h;
         if (get_node_pixels(node, pixels, w, h)) {
+#ifdef _WIN32
+            // Win32: put DIB on clipboard
+            uint32_t rowBytes = w * 4;
+            uint32_t dataSize = sizeof(BITMAPINFOHEADER) + rowBytes * h;
+            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, dataSize);
+            if (hMem) {
+                void* ptr = GlobalLock(hMem);
+                BITMAPINFOHEADER* bih = (BITMAPINFOHEADER*)ptr;
+                memset(bih, 0, sizeof(*bih));
+                bih->biSize = sizeof(BITMAPINFOHEADER);
+                bih->biWidth = (LONG)w;
+                bih->biHeight = -(LONG)h; // top-down
+                bih->biPlanes = 1;
+                bih->biBitCount = 32;
+                bih->biCompression = BI_RGB;
+                // Copy RGBA pixels (Windows CF_DIB expects BGRA)
+                uint8_t* dst = (uint8_t*)ptr + sizeof(BITMAPINFOHEADER);
+                for (uint32_t i = 0; i < w * h; i++) {
+                    dst[i*4+0] = pixels[i*4+2]; // B
+                    dst[i*4+1] = pixels[i*4+1]; // G
+                    dst[i*4+2] = pixels[i*4+0]; // R
+                    dst[i*4+3] = pixels[i*4+3]; // A
+                }
+                GlobalUnlock(hMem);
+                if (OpenClipboard(NULL)) {
+                    EmptyClipboard();
+                    SetClipboardData(CF_DIB, hMem);
+                    CloseClipboard();
+                } else {
+                    GlobalFree(hMem);
+                }
+            }
+#else
             write_png_file("/tmp/exodia_clip.png", w, h, pixels.data());
             system("xclip -selection clipboard -t image/png -i /tmp/exodia_clip.png 2>/dev/null &");
+#endif
             g_extract_clip_time = glfwGetTime();
             add_toast("Image copied to clipboard");
         } else {
             add_toast("No pixel data available");
         }
     } else if (node.node_type == NODE_TEXT) {
+#ifdef _WIN32
+        glfwSetClipboardString(app.window, node.text.c_str());
+#else
         FILE* p = popen("xclip -selection clipboard 2>/dev/null", "w");
         if (p) {
             fwrite(node.text.data(), 1, node.text.size(), p);
             pclose(p);
-            add_toast("Text copied to clipboard");
         }
+#endif
+        add_toast("Text copied to clipboard");
     } else if (node.node_type == NODE_VIDEO) {
         add_toast("Cannot copy video to clipboard");
     }
@@ -132,8 +172,20 @@ static std::string detect_video_ext(const char* path) {
 }
 
 static void extract_to_folder(const DataNode& node) {
+#ifdef _WIN32
+    char tmpdir[MAX_PATH];
+    {
+        char tmpBase[MAX_PATH];
+        GetTempPathA(MAX_PATH, tmpBase);
+        snprintf(tmpdir, sizeof(tmpdir), "%sexodia_%u", tmpBase, (unsigned)GetTickCount());
+        if (!CreateDirectoryA(tmpdir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+            add_toast("Failed to create temp folder"); return;
+        }
+    }
+#else
     char tmpdir[] = "/tmp/exodia_XXXXXX";
     if (!mkdtemp(tmpdir)) { add_toast("Failed to create temp folder"); return; }
+#endif
 
     if (node.node_type == NODE_IMAGE) {
         std::vector<unsigned char> pixels;
@@ -166,7 +218,11 @@ static void extract_to_folder(const DataNode& node) {
     }
 
     char cmd[512];
+#ifdef _WIN32
+    snprintf(cmd, sizeof(cmd), "explorer \"%s\"", tmpdir);
+#else
     snprintf(cmd, sizeof(cmd), "xdg-open '%s' 2>/dev/null &", tmpdir);
+#endif
     system(cmd);
 }
 
@@ -467,7 +523,7 @@ static void send_add_video(const char* path, float offset) {
 }
 
 void drop_cb(GLFWwindow* window, int count, const char** paths) {
-    if (g_net_fd < 0) return;
+    if (!sock_valid(g_net_fd)) return;
     float spacing = 12.0f;
     float start_offset = -(count - 1) * spacing * 0.5f;
 
@@ -590,23 +646,53 @@ static uint32_t fnv1a(const unsigned char* data, size_t len) {
 }
 
 void check_clipboard() {
-    if (g_net_fd < 0) return;
+    if (!sock_valid(g_net_fd)) return;
     double now = glfwGetTime();
     if (now - g_extract_clip_time < 5.0) return;  // Suppress after Ctrl+C
     if (now - g_last_clip_time < 2.0) return;
     g_last_clip_time = now;
 
+    std::vector<unsigned char> data;
+
+#ifdef _WIN32
+    // Win32 clipboard: check for CF_DIB image data
+    if (!OpenClipboard(NULL)) return;
+    HANDLE hDib = GetClipboardData(CF_DIB);
+    if (hDib) {
+        void* dibData = GlobalLock(hDib);
+        if (dibData) {
+            SIZE_T dibSize = GlobalSize(hDib);
+            // Prepend a BMP file header so stb_image can decode it
+            uint32_t fileSize = (uint32_t)(14 + dibSize);
+            data.resize(fileSize);
+            data[0] = 'B'; data[1] = 'M';
+            memcpy(data.data() + 2, &fileSize, 4);
+            memset(data.data() + 6, 0, 4); // reserved
+            // Offset to pixel data: file header (14) + DIB header size
+            BITMAPINFOHEADER* bih = (BITMAPINFOHEADER*)dibData;
+            uint32_t pixOffset = 14 + bih->biSize;
+            // Account for color table in indexed formats
+            if (bih->biBitCount <= 8) {
+                uint32_t colors = bih->biClrUsed ? bih->biClrUsed : (1u << bih->biBitCount);
+                pixOffset += colors * 4;
+            }
+            memcpy(data.data() + 10, &pixOffset, 4);
+            memcpy(data.data() + 14, dibData, dibSize);
+            GlobalUnlock(hDib);
+        }
+    }
+    CloseClipboard();
+    if (data.empty()) return;
+#else
     FILE* p = popen("xclip -selection clipboard -t image/png -o 2>/dev/null", "r");
     if (!p) return;
-
-    std::vector<unsigned char> data;
     unsigned char buf[4096];
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), p)) > 0)
         data.insert(data.end(), buf, buf + n);
-
     int status = pclose(p);
     if (status != 0 || data.size() < 8) return;
+#endif
 
     uint32_t h = fnv1a(data.data(), data.size());
     if (h == g_last_clip_hash) return;
@@ -667,7 +753,7 @@ static bool is_media_text_ext(const std::string& ext) {
 }
 
 void check_media_folder() {
-    if (g_net_fd < 0) return;
+    if (!sock_valid(g_net_fd)) return;
     double now = glfwGetTime();
     if (now - g_last_media_check < 1.0) return;
     g_last_media_check = now;
