@@ -102,6 +102,8 @@ int main(int argc, char** argv) {
     setbuf(stdout, NULL);
 #ifdef _WIN32
     WinsockInit _wsa;
+    // Disable console Ctrl+C handler so it reaches GLFW as a key event
+    SetConsoleCtrlHandler(NULL, TRUE);
 #endif
     using Clock = std::chrono::high_resolution_clock;
 

@@ -655,32 +655,105 @@ void check_clipboard() {
     std::vector<unsigned char> data;
 
 #ifdef _WIN32
-    // Win32 clipboard: check for CF_DIB image data
+    // Win32 clipboard: try multiple image formats in priority order.
+    // Snipping Tool, Discord, browsers use PNG; Paint uses CF_DIB; others use CF_BITMAP.
     if (!OpenClipboard(NULL)) return;
-    HANDLE hDib = GetClipboardData(CF_DIB);
-    if (hDib) {
-        void* dibData = GlobalLock(hDib);
-        if (dibData) {
-            SIZE_T dibSize = GlobalSize(hDib);
-            // Prepend a BMP file header so stb_image can decode it
-            uint32_t fileSize = (uint32_t)(14 + dibSize);
-            data.resize(fileSize);
-            data[0] = 'B'; data[1] = 'M';
-            memcpy(data.data() + 2, &fileSize, 4);
-            memset(data.data() + 6, 0, 4); // reserved
-            // Offset to pixel data: file header (14) + DIB header size
-            BITMAPINFOHEADER* bih = (BITMAPINFOHEADER*)dibData;
-            uint32_t pixOffset = 14 + bih->biSize;
-            // Account for color table in indexed formats
-            if (bih->biBitCount <= 8) {
-                uint32_t colors = bih->biClrUsed ? bih->biClrUsed : (1u << bih->biBitCount);
-                pixOffset += colors * 4;
+
+    // 1. PNG registered format — used by Snipping Tool, Discord, browsers, etc.
+    static UINT cf_png = RegisterClipboardFormatA("PNG");
+    if (data.empty()) {
+        HANDLE hPng = GetClipboardData(cf_png);
+        if (hPng) {
+            void* ptr = GlobalLock(hPng);
+            if (ptr) {
+                SIZE_T sz = GlobalSize(hPng);
+                data.assign((unsigned char*)ptr, (unsigned char*)ptr + sz);
+                GlobalUnlock(hPng);
             }
-            memcpy(data.data() + 10, &pixOffset, 4);
-            memcpy(data.data() + 14, dibData, dibSize);
-            GlobalUnlock(hDib);
         }
     }
+
+    // 2. CF_DIBV5 — enhanced DIB with alpha, used by some modern apps
+    if (data.empty()) {
+        HANDLE hDib5 = GetClipboardData(CF_DIBV5);
+        if (hDib5) {
+            void* dibData = GlobalLock(hDib5);
+            if (dibData) {
+                SIZE_T dibSize = GlobalSize(hDib5);
+                uint32_t fileSize = (uint32_t)(14 + dibSize);
+                data.resize(fileSize);
+                data[0] = 'B'; data[1] = 'M';
+                memcpy(data.data() + 2, &fileSize, 4);
+                memset(data.data() + 6, 0, 4);
+                BITMAPV5HEADER* bih = (BITMAPV5HEADER*)dibData;
+                uint32_t pixOffset = 14 + bih->bV5Size;
+                memcpy(data.data() + 10, &pixOffset, 4);
+                memcpy(data.data() + 14, dibData, dibSize);
+                GlobalUnlock(hDib5);
+            }
+        }
+    }
+
+    // 3. CF_DIB — standard device-independent bitmap (Paint, older apps)
+    if (data.empty()) {
+        HANDLE hDib = GetClipboardData(CF_DIB);
+        if (hDib) {
+            void* dibData = GlobalLock(hDib);
+            if (dibData) {
+                SIZE_T dibSize = GlobalSize(hDib);
+                uint32_t fileSize = (uint32_t)(14 + dibSize);
+                data.resize(fileSize);
+                data[0] = 'B'; data[1] = 'M';
+                memcpy(data.data() + 2, &fileSize, 4);
+                memset(data.data() + 6, 0, 4);
+                BITMAPINFOHEADER* bih = (BITMAPINFOHEADER*)dibData;
+                uint32_t pixOffset = 14 + bih->biSize;
+                if (bih->biBitCount <= 8) {
+                    uint32_t colors = bih->biClrUsed ? bih->biClrUsed : (1u << bih->biBitCount);
+                    pixOffset += colors * 4;
+                }
+                memcpy(data.data() + 10, &pixOffset, 4);
+                memcpy(data.data() + 14, dibData, dibSize);
+                GlobalUnlock(hDib);
+            }
+        }
+    }
+
+    // 4. CF_BITMAP — device-dependent bitmap, convert via GDI
+    if (data.empty()) {
+        HBITMAP hBmp = (HBITMAP)GetClipboardData(CF_BITMAP);
+        if (hBmp) {
+            BITMAP bm;
+            GetObject(hBmp, sizeof(bm), &bm);
+            int w = bm.bmWidth, h = bm.bmHeight;
+            if (w > 0 && h > 0) {
+                BITMAPINFOHEADER bi = {};
+                bi.biSize = sizeof(bi);
+                bi.biWidth = w;
+                bi.biHeight = h; // bottom-up for BMP file
+                bi.biPlanes = 1;
+                bi.biBitCount = 32;
+                bi.biCompression = BI_RGB;
+                uint32_t rowBytes = w * 4;
+                uint32_t pixelSize = rowBytes * h;
+                uint32_t headerSize = 14 + sizeof(BITMAPINFOHEADER);
+                uint32_t fileSize = headerSize + pixelSize;
+                data.resize(fileSize);
+                data[0] = 'B'; data[1] = 'M';
+                memcpy(data.data() + 2, &fileSize, 4);
+                memset(data.data() + 6, 0, 4);
+                memcpy(data.data() + 10, &headerSize, 4);
+                memcpy(data.data() + 14, &bi, sizeof(bi));
+                HDC hdc = GetDC(NULL);
+                BITMAPINFOHEADER biQuery = bi;
+                biQuery.biHeight = -h; // top-down for GetDIBits
+                GetDIBits(hdc, hBmp, 0, h, data.data() + headerSize,
+                          (BITMAPINFO*)&biQuery, DIB_RGB_COLORS);
+                ReleaseDC(NULL, hdc);
+            }
+        }
+    }
+
     CloseClipboard();
     if (data.empty()) return;
 #else
@@ -821,8 +894,10 @@ void check_media_folder() {
                 if (cf) { fwrite(file_data.data(), 1, file_data.size(), cf); fclose(cf); }
             }
 
-            // Start video player to get real dimensions (matches drag-and-drop path)
-            int vpi = start_video_player(path.c_str());
+            // Start video player from cache (not dump-folder original — Windows can't
+            // delete a file with an open handle, and FFmpeg keeps it open)
+            std::string cache_vid = "image_cache/vid_" + std::to_string(hash) + ".tmp";
+            int vpi = start_video_player(cache_vid.c_str());
             int vw = 320, vh = 240;
             if (vpi >= 0) {
                 vw = app.video_players[vpi].w;
@@ -885,9 +960,9 @@ void process_input(float dt) {
     GLFWwindow* w = app.window; Camera& c = app.cam;
     c.update_vectors();
 
-    // Ctrl+Escape: quit immediately
+    // Shift+Escape: quit immediately (Ctrl+Escape opens Windows Start Menu)
     if (glfwGetKey(w,GLFW_KEY_ESCAPE)==GLFW_PRESS &&
-        (glfwGetKey(w,GLFW_KEY_LEFT_CONTROL)==GLFW_PRESS || glfwGetKey(w,GLFW_KEY_RIGHT_CONTROL)==GLFW_PRESS)) {
+        (glfwGetKey(w,GLFW_KEY_LEFT_SHIFT)==GLFW_PRESS || glfwGetKey(w,GLFW_KEY_RIGHT_SHIFT)==GLFW_PRESS)) {
         glfwSetWindowShouldClose(w,1);
         return;
     }
